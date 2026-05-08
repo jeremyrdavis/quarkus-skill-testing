@@ -24,16 +24,14 @@ The skill is a single `SKILL.md` file with YAML frontmatter. Drop the directory 
 User-level (active across every project):
 
 ```bash
-git clone https://github.com/<your-org>/quarkus-testing.git ~/.claude/skills/quarkus-testing
+git clone https://github.com/jeremyrdavis/quarkus-skill-testing.git ~/.claude/skills/quarkus-testing
 ```
 
 Project-level (active only in one project):
 
 ```bash
-git clone https://github.com/<your-org>/quarkus-testing.git <your-project>/.claude/skills/quarkus-testing
+git clone https://github.com/jeremyrdavis/quarkus-skill-testing.git <your-project>/.claude/skills/quarkus-testing
 ```
-
-Replace `<your-org>` with the GitHub owner once the repo is published.
 
 ### Other agents
 
