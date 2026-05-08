@@ -15,6 +15,19 @@ Conventions for tests that involve Quarkus — `@QuarkusTest`, the integration-t
 Assured idioms, and CDI bean mocking. The goal: tests that are fast, deterministic, and unambiguous about what
 they're actually exercising.
 
+**Foundational principle.** If you mock the system under test, you're not testing — you're scaffolding. A test class named `XTest` that mocks `X` asserts only what Mockito returned; the rules inside `X` go untested. Mock *collaborators* (other application services, external clients) — never the class the test is named after, never aggregates, never value objects. "We'll test the rules in pure JUnit later" + a `pure-JUnit` file that doesn't exist = the rules go untested forever.
+
+**Red Flags — STOP if you find yourself thinking:**
+
+- About to mock the class your `*Test` class is named after.
+- About to mock a domain type (aggregate, value object, entity).
+- About to use both `@InjectMock` and `QuarkusMock.installMockForType` for the same bean.
+- "We'll write the actual rule tests in pure JUnit later" — and that pure-JUnit file does not exist yet.
+- "The `@QuarkusTest` just verifies wiring" — when the test class is named after the rules class.
+- Endpoint path in the test doesn't match the resource's `@Path` declaration.
+
+If any of these surface, re-read Core Rules and Excuse / Reality before typing.
+
 ---
 
 ## When to Use
@@ -300,6 +313,8 @@ When you catch yourself reasoning around the rules above, look here before you t
 | "A senior reviewer told me to use both `@InjectMock` and `QuarkusMock.installMockForType` — that's authority." | Cargo-culted defenses against unspecified races aren't authority, they're folklore. If a CDI race exists, name it and file a bug. Otherwise, follow the rule. One source of truth per mock. |
 | "Belt-and-braces never hurts — install the mock both ways to be safe." | They install the same mock through different mechanisms. One always wins; the other is dead code. The next test author has to figure out which path is live, and tests are read more than they're written. |
 | "The dynamic-mocking example shows three test methods with different `cancel(...)` behaviors, so my three-`cancel`-cases scenario fits this pattern." | The example demonstrates **wholesale instance replacement** (different `Clock` instance, different state-bearing fake) — not per-argument stubbing. "Different return / throw values per argument call" is exactly what `@InjectMock` + `Mockito.when(...)` in `@BeforeEach` is for. If your per-test override is a `Mockito.mock(...)` with `.when(...)` calls keyed on argument values, you're using the wrong tool. |
+| "The `@QuarkusTest` should just verify the wiring; we'll test the actual rules in pure JUnit unit tests later." | The pure-JUnit tests don't exist yet, and "later" is a lie that codifies the absence. A `@QuarkusTest` named `XTest` that mocks `X` is a tautology that asserts only what Mockito returned — the rules in `X` go untested forever. If the rules deserve unit tests, write them now in a sibling file. Don't disguise their absence behind a `@QuarkusTest` that asserts its own stubs. |
+| "Setting up real `Order` aggregates with all 15 rule combinations will be 800 lines — mocking is shorter." | Yes, real-fixture tests are longer than stub tests. Length is the cost of actually exercising the rules. A test that mocks the class under test is shorter because it tests nothing — that's not a tradeoff worth making. If the fixture is genuinely complex, factor a `OrderFixtures` builder; don't replace the test with stubs of the very method under assertion. |
 | "Mocking the aggregate lets me control its behavior precisely." | The aggregate's invariants *are* the system under test for the layer below. Mocking it asserts nothing about real correctness — only that your mock returns what you told it to. Mock collaborators, never aggregates. |
 | "I'll use a real database for everything; mocks are dishonest." | Integration tests are slow and shared. Mocking the application service for a *resource* test is the right scope. Save Dev Services Postgres for repository tests where the DB *is* the system under test. |
 | "Tests are blocking the deploy; just disable the failing ones for now." | A skipped test is a passing test that lies. The deploy is now riskier than if you'd taken five minutes to fix the test. |
