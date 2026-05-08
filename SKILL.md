@@ -201,57 +201,68 @@ class OrderRepositoryTest {
 
 ### Dynamic mocking pattern — `installMockForType` + `installMockForInstance`
 
-Demonstrates **Rule 4(c) + Rule 5**. Install a default mock in `@BeforeAll`; for individual test methods that need different behavior, swap with `installMockForInstance(perTestMock, defaultMock)`. The same shape is used for **Rule 4(a)** when the default is a hand-rolled fake instead of a Mockito mock.
+**Before reaching for this pattern, confirm `@InjectMock` doesn't fit.** This pattern is **not** for the common case of "method behaves differently depending on argument." If your tests need
+
+```java
+Mockito.doNothing().when(orders).cancel(1L);
+Mockito.doThrow(new OrderNotFoundException(99L)).when(orders).cancel(99L);
+Mockito.doThrow(new OrderAlreadyFulfilledException(2L)).when(orders).cancel(2L);
+```
+
+— that's **per-call stubbing by argument**, which `@InjectMock` + `Mockito.when(...)` in `@BeforeEach` already handles cleanly. Per Rule 3, that is the default. Mockito differentiates by argument matcher; you do not need to swap the instance.
+
+`installMockForInstance` is for the rarer case where the test needs the **entire bean instance replaced** with one of fundamentally different behavior — typically a different fake implementation, a clock fixed to a different time, a feature-flag client configured with a different flag set, etc. The discriminator is *the whole object*, not *which arguments it was called with*.
 
 **Caveat (Rule 6):** This pattern is incompatible with parallel test execution. If the project runs tests in parallel, fall back to `@InjectMock`.
+
+The canonical legitimate case: a `Clock` bean fixed to one time by default, swapped to a different time for one test that exercises an expiry path. There is no method-stubbing by argument — both instances are real `Clock` objects with all-different behavior end-to-end.
 
 ```java
 package com.example.orders.interfaces.rest;
 
-import com.example.orders.application.OrderApplicationService;
-import com.example.orders.application.OrderNotFoundException;
 import io.quarkus.test.junit.QuarkusMock;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
+
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 
 import static io.restassured.RestAssured.given;
 
 @QuarkusTest
-class OrdersResourceTest {
+class OrderExpiryResourceTest {
 
-    static OrderApplicationService defaultMock;
+    static Clock defaultClock;
 
     @BeforeAll
     static void installDefault() {
-        defaultMock = Mockito.mock(OrderApplicationService.class);
-        Mockito.doNothing().when(defaultMock).cancel(Mockito.anyLong());
-        QuarkusMock.installMockForType(defaultMock, OrderApplicationService.class);
+        defaultClock = Clock.fixed(Instant.parse("2026-05-08T10:00:00Z"), ZoneOffset.UTC);
+        QuarkusMock.installMockForType(defaultClock, Clock.class);
     }
 
     @Test
-    void cancelOrderReturns204WhenSuccessful() {
-        // default mock applies — cancel succeeds for any id
-        given().when().delete("/orders/1").then().statusCode(204);
+    void orderIsActiveAtDefaultTime() {
+        given().when().get("/orders/1").then().statusCode(200);
     }
 
     @Test
-    void cancelOrderReturns404WhenMissing() {
-        OrderApplicationService perTest = Mockito.mock(OrderApplicationService.class);
-        Mockito.doThrow(new OrderNotFoundException(99L)).when(perTest).cancel(99L);
-        QuarkusMock.installMockForInstance(perTest, defaultMock);
+    void orderHasExpiredOneYearLater() {
+        Clock yearLater = Clock.fixed(Instant.parse("2027-05-08T10:00:00Z"), ZoneOffset.UTC);
+        QuarkusMock.installMockForInstance(yearLater, defaultClock);
 
-        given().when().delete("/orders/99").then().statusCode(404);
+        given().when().get("/orders/1").then().statusCode(410);
     }
 }
 ```
 
 Key points:
 
-- The default mock is held as a `static` field so per-test methods can pass it to `installMockForInstance` as the existing instance to replace.
-- `installMockForInstance(newMock, existingInstance)` swaps the registered mock for the duration of the test method only.
-- This pattern is overkill for most tests. Reach for it only when `@InjectMock` + per-call stubbing in `@BeforeEach` genuinely doesn't fit (e.g. tests need to swap the entire mock instance, not just stub different return values per call).
+- The default instance is held as a `static` field so per-test methods can pass it to `installMockForInstance` as the existing instance to replace.
+- `installMockForInstance(newInstance, existingInstance)` swaps the registered bean for the duration of the test method only.
+- Both `defaultClock` and `yearLater` are *complete* `Clock` instances. Nothing is stubbed per-call. That's the shape that genuinely requires this pattern.
+- If you find yourself writing `Mockito.when(...)` or `Mockito.doThrow(...)` inside the per-test mock, stop and ask whether `@InjectMock` would do the job. Almost always: yes.
 
 What these examples demonstrate:
 
@@ -269,6 +280,7 @@ What these examples demonstrate:
 | Don't | Why it's wrong | Fix |
 |---|---|---|
 | `@InjectMock OrderService orderService;` *and* `QuarkusMock.installMockForType(mock, OrderService.class)` for the same bean | Two ways of installing the same mock; one always wins, the other is dead code that misleads readers. | Pick `@InjectMock` and stub in `@BeforeEach`. Drop the `installMockForType` call. |
+| Per-test `installMockForInstance` to vary return values by argument (`cancel(1L)` succeeds, `cancel(99L)` throws, `cancel(2L)` throws something else) | That's per-call stubbing, which `@InjectMock` + `Mockito.when(...).thenReturn/thenThrow` in `@BeforeEach` already does. `installMockForInstance` is for replacing the *whole bean instance*, not for varying responses per argument. | Use `@InjectMock` and stub each argument case in `@BeforeEach`. Reserve `installMockForInstance` for genuine wholesale-instance swap (e.g. a `Clock` fixed to a different time, a fake configured with different state at construction). |
 | `OrderService mockOrderRepository = Mockito.mock(OrderService.class)` | Mixing "Service" and "Repository" in the variable name is exactly the layer confusion the type system is supposed to prevent. | Match the variable name to the type: `OrderService orders = Mockito.mock(OrderService.class)`. |
 | Mocking `Order` (an aggregate) | The aggregate's invariants are the thing under test. Mocking it bypasses the invariants. | Use a real `Order` instance built with its factory method. Mock only the repository or external client. |
 | Test hits `/api/orders` while the resource is `@Path("/orders")` | The test asserts a route that doesn't exist; failure is not informative. | Fix the test to match what the resource's `@Path` actually declares. |
@@ -287,6 +299,7 @@ When you catch yourself reasoning around the rules above, look here before you t
 |---|---|
 | "A senior reviewer told me to use both `@InjectMock` and `QuarkusMock.installMockForType` — that's authority." | Cargo-culted defenses against unspecified races aren't authority, they're folklore. If a CDI race exists, name it and file a bug. Otherwise, follow the rule. One source of truth per mock. |
 | "Belt-and-braces never hurts — install the mock both ways to be safe." | They install the same mock through different mechanisms. One always wins; the other is dead code. The next test author has to figure out which path is live, and tests are read more than they're written. |
+| "The dynamic-mocking example shows three test methods with different `cancel(...)` behaviors, so my three-`cancel`-cases scenario fits this pattern." | The example demonstrates **wholesale instance replacement** (different `Clock` instance, different state-bearing fake) — not per-argument stubbing. "Different return / throw values per argument call" is exactly what `@InjectMock` + `Mockito.when(...)` in `@BeforeEach` is for. If your per-test override is a `Mockito.mock(...)` with `.when(...)` calls keyed on argument values, you're using the wrong tool. |
 | "Mocking the aggregate lets me control its behavior precisely." | The aggregate's invariants *are* the system under test for the layer below. Mocking it asserts nothing about real correctness — only that your mock returns what you told it to. Mock collaborators, never aggregates. |
 | "I'll use a real database for everything; mocks are dishonest." | Integration tests are slow and shared. Mocking the application service for a *resource* test is the right scope. Save Dev Services Postgres for repository tests where the DB *is* the system under test. |
 | "Tests are blocking the deploy; just disable the failing ones for now." | A skipped test is a passing test that lies. The deploy is now riskier than if you'd taken five minutes to fix the test. |
